@@ -1,7 +1,7 @@
 # Archive manifest
 
 This file lists the source files and columns for each table, figure, and
-in-text number in `paper/main.tex`. Table and figure numbers follow the
+in-text number in the manuscript. Table and figure numbers follow the
 manuscript. Table A1 maps model names such as KF, KF-R1, KF-R12, and KF-R12E to
 their identifiers in the result files.
 

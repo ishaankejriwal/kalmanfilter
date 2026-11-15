@@ -129,12 +129,11 @@ Sciences, 2026.
 Kejriwal, I. and Wang, I.: Data and code for "A Kalman filter benchmark for
 data-driven forecasts of GRACE terrestrial water storage", Zenodo, 2026.
 
-We will add the deposit DOI.
+Data and code: [Zenodo deposit](https://doi.org/10.5281/zenodo.24249848).
 
 ## License
 
-We release the code under the [MIT license](LICENSE). The Copernicus LaTeX
-class, style, and template files under `paper/` retain Copernicus's terms.
+We release the code under the [MIT license](LICENSE).
 
 We release data and result files under CC BY 4.0. Files derived from CSR and
 JPL mascons, ERA5-Land, NOAA indices, GRACE-FCast, and HydroSHEDS remain subject

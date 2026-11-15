@@ -114,5 +114,4 @@ Other scripts:
 | Script | Purpose |
 |---|---|
 | `run_chain.py` | Runs the chain with options `--extended`, `--steps`, `--list`, `--source jpl`, `--mascon-file`, `--no-scale-factors` |
-| `audit_paper_statistics.py` | Recomputes Table B1 statistics from prediction files and checks them against `paper/main.tex`. Leaves the files unchanged. |
 | `build_deposit.py` | Prepares the Zenodo code and data archives in `deposit/` for a separate upload. |

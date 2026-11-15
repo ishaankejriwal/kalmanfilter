@@ -5,22 +5,22 @@ Hydrology and Earth System Sciences.
 
 ## Contents
 
-The deposit has three archives. The code and data archives unpack into the same folder,
-`kalmanfilter-<commit>/`.
+The deposit contains three archives. The code and data archives share the
+top-level directory `kalmanfilter-v1.0/`.
 
-`kalmanfilter-<commit>-code.zip` contains the repository at the commit cited in
-the manuscript. It excludes our working notes and submission tools. The code
-archive contains these files:
+`kalmanfilter-v1.0-code.zip` contains release v1.0 of the
+[repository](https://github.com/ishaankejriwal/kalmanfilter). It excludes our
+working notes and submission tools. The code archive contains these files:
 
 - The `gracefc` package (`src/`)
 - The experiment and figure scripts (`scripts/`)
 - Every result table behind the manuscript (`results/*.csv`, `results/jpl/*.csv`)
-- The figures and LaTeX source.
+- The figures.
 
 `README.md` describes the pipeline. `docs/ARCHIVE_MANIFEST.md` maps each
 manuscript table and figure to its source file and column.
 
-`kalmanfilter-<commit>-data.zip` contains the files that git excludes for size,
+`kalmanfilter-v1.0-data.zip` contains the files that git excludes for size,
 plus a copy of this README:
 
 | Path | Content |
@@ -162,8 +162,7 @@ When you reuse these files, cite the original products.
 
 ## License
 
-We release the code under MIT (see `LICENSE`). The Copernicus LaTeX class,
-style, and template files under `paper/` retain Copernicus's terms.
+We release the code under MIT (see `LICENSE`).
 
 We release data and result files under CC BY 4.0. Files derived from the
 third-party products above remain subject to those products' attribution terms.
