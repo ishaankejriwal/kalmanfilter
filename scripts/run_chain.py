@@ -1,0 +1,468 @@
+"""Run the analysis pipeline in dependency order and stop at the first failure.
+
+Each step runs one script with declared input and output files. A step is blocked if
+any input is missing, and fails if the script exits non-zero or if any declared output
+is missing or was not rewritten during the run. Script output goes to
+results/chain_<step>.log (results/jpl/ for --source jpl).
+
+The default list builds the processed basin tables, the benchmark forecasts (phase2,
+kalman), KF-R1, KF-R12 and KF-R12E (flat12_ridge), the two-variance and zero-r
+variants of the filter (kalman_mission, r0_ablation), the benchmark tables
+(Table 2, Appendix B), the GRACE-FCast comparison (Table 5), the centimeter metrics
+(Appendix C) and the checksum manifest. It does not need torch. The extended list holds
+the neighbor experiments (Sect. 4.6), the nonlinear models (Table 4, Fig. 6), the
+training-matched KF-R12E refit (Fig. 6b), several experiments not reported in the
+paper, and the figures. The figures step also reads the JPL comparison tables in
+results/jpl/ and is unavailable on JPL because make_figures.py asserts the CSR values
+quoted in the paper. climatology_offset.py, kalman_gain_correlates.py and
+centimeter_contrasts.py (Sects. 3.1, 4.1, 4.5) are not chain steps; run them after the
+default list.
+
+Steps that need network access or credentials are not part of the chain: downloading
+the CSR mascon and ancillary files, the basin mask, ERA5-Land
+(scripts/download_era5.py), the GRACE-FCast archive and the climate indices
+(scripts/download_indices.py). See "Input data" in README.md.
+
+results/kalman_fold_params.pkl is a content-addressed cache of the fitted filter
+parameters (src/gracefc/cache.py). flat12_ridge, phase3b and the phase5 in-filter steps
+rewrite it only when it is missing or stale, so it is never a declared output (a cache
+hit would fail the freshness check). Steps that read it declare it as an input.
+
+The archived tables in results/jpl/ were produced at commit 71be5ec of the JPL pipeline
+branch (results/jpl/RUN_PROVENANCE.md; archived as
+kalmanfilter-71be5ec-jpl-run-code.zip).
+
+Usage:
+  python scripts/run_chain.py               # default list, in order
+  python scripts/run_chain.py --extended    # extended list only
+  python scripts/run_chain.py --source jpl  # JPL product, outputs under results/jpl/
+  python scripts/run_chain.py --steps a b   # named steps, in the order given
+  python scripts/run_chain.py --list        # steps with their inputs and outputs
+"""
+import argparse
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RESULTS = ROOT / "results"
+DATA = ROOT / "data" / "processed"
+RAW = ROOT / "data" / "raw"
+FIGURES = ROOT / "figures"
+PY = Path(sys.executable)
+
+MASCON_NC = ROOT / "CSR_GRACE_GRACE-FO_RL0603_Mascons_all-corrections.nc"
+MASK_NC = ROOT / "HydroShed+Mascon_Basins_L3.nc"
+CSR_MAPPING_NC = RAW / "csr_ancillary" / "CSR_GRACE_GRACE-FO_RL0603_mascons_mapping_file.nc"
+CSR_LANDMASK_NC = RAW / "csr_ancillary" / "CSR_GRACE_GRACE-FO_RL06_Mascons_v02_LandMask.nc"
+# Read only by the CSR native-mascon geometry loader; the JPL paths never touch them.
+CSR_GEOMETRY_FILES = (MASCON_NC, CSR_MAPPING_NC, CSR_LANDMASK_NC)
+
+# (name, script args, input files, output files)
+STEPS: list[tuple[str, list[str], list[Path], list[Path]]] = [
+    ("build_basin",
+     ["scripts/build_basin_series.py"],
+     [MASCON_NC, MASK_NC],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv"]),
+
+    ("build_era5",
+     ["scripts/build_era5_basin_table.py"],
+     [RAW / "era5", MASK_NC],
+     [DATA / "era5_basin_month.csv", DATA / "era5_basin_coverage.csv"]),
+
+    # On CSR, build_li counts native mascons with
+    # run_resolution_sensitivity.load_official_geometry, which reads the lat/lon axes of
+    # the solutions file and the two CSR ancillary grids. On JPL, mascon_ID comes from the
+    # product itself, so steps_for_source drops these three inputs.
+    ("build_li",
+     ["scripts/build_li_basin_series.py"],
+     [RAW / "li2026" / "CSR-FCast" / "global_gridded", MASK_NC, DATA / "basin_meta.csv",
+      *CSR_GEOMETRY_FILES],
+     [DATA / "li2026_csr_basin_forecasts.csv", DATA / "li2026_basin_coverage.csv"]),
+
+    ("phase2",
+     ["scripts/run_phase2_baselines.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv", DATA / "indices.csv"],
+     [RESULTS / "phase2_baseline_predictions.csv", RESULTS / "phase2_strata.csv",
+      RESULTS / "phase2_baseline_summary.csv"]),
+
+    ("kalman",
+     ["scripts/run_kalman_baseline.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      RESULTS / "phase2_baseline_predictions.csv"],
+     [RESULTS / "kalman_predictions.csv"]),
+
+    ("flat12_ridge",
+     ["scripts/run_flat12_ridge.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "era5_basin_month.csv"],
+     [RESULTS / "flat12_ridge_predictions.csv", RESULTS / "flat12_ridge_summary.csv"]),
+
+    ("kalman_mission",
+     ["scripts/run_kalman_mission_sensitivity.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      RESULTS / "kalman_predictions.csv", RESULTS / "phase2_baseline_predictions.csv"],
+     [RESULTS / "kalman_mission_predictions.csv", RESULTS / "kalman_mission_params.csv",
+      RESULTS / "kalman_mission_summary.csv", RESULTS / "kalman_mission_perbasin_h1.csv"]),
+
+    ("phase3b",
+     ["scripts/run_phase3b_kalman_neighbors.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv"],
+     [RESULTS / "phase3b_predictions.csv", RESULTS / "phase3b_summary.csv",
+      RESULTS / "phase3b_placebo_basin.csv"]),
+
+    ("jump_screen",
+     ["scripts/run_jump_screen.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      RESULTS / "phase3b_predictions.csv", RESULTS / "phase3b_placebo_basin.csv"],
+     [RESULTS / "phase4_jump_screen.csv"]),
+
+    ("predlag",
+     ["scripts/run_phase3b_kalman_neighbors.py", "--cells", "pred_lag1:1,2",
+      "--seeds", "50", "--tag", "phase5_predlag"],
+     [DATA / "basin_month_twsa_global.csv", RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase5_predlag_predictions.csv", RESULTS / "phase5_predlag_summary.csv"]),
+
+    ("conditioned",
+     ["scripts/run_phase3b_kalman_neighbors.py", "--cells", "corr:1", "corr_min300:1",
+      "--seeds", "50", "--tag", "phase4_conditioned", "--condition-indices", "nino34", "dmi"],
+     [DATA / "indices.csv", RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase4_conditioned_predictions.csv", RESULTS / "phase4_conditioned_summary.csv"]),
+
+    ("surrogates",
+     ["scripts/run_phase4_surrogates.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase4_surrogate_summary.csv"]),
+
+    ("r0_ablation",
+     ["scripts/run_r0_ablation.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      RESULTS / "kalman_predictions.csv", RESULTS / "phase2_baseline_predictions.csv"],
+     [RESULTS / "kalman_r0_predictions.csv", RESULTS / "r0_ablation_summary.csv"]),
+
+    ("phase5_fusion",
+     ["scripts/run_phase5_infilter.py", "--model", "fusion"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase5_fusion_predictions.csv", RESULTS / "phase5_fusion_summary.csv"]),
+
+    ("phase5_coupled",
+     ["scripts/run_phase5_infilter.py", "--model", "coupled"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase5_coupled_predictions.csv", RESULTS / "phase5_coupled_coupling.csv",
+      RESULTS / "phase5_coupled_summary.csv"]),
+
+    ("phase5_nonlinear",
+     ["scripts/run_phase5_nonlinear.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase5_nonlinear_predictions.csv"]),
+
+    ("phase5_stats",
+     ["scripts/run_phase5_stats.py"],
+     [RESULTS / "phase3b_predictions.csv", RESULTS / "phase5_predlag_predictions.csv",
+      RESULTS / "phase5_fusion_predictions.csv", RESULTS / "phase5_coupled_predictions.csv",
+      RESULTS / "phase5_nonlinear_predictions.csv"],
+     [RESULTS / "phase5_headline_table.csv", RESULTS / "phase5_perbasin_fdr_h1.csv"]),
+
+    ("li_comparison",
+     ["scripts/run_phase6_li_comparison.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "li2026_csr_basin_forecasts.csv", DATA / "li2026_basin_coverage.csv",
+      RESULTS / "kalman_predictions.csv", RESULTS / "flat12_ridge_predictions.csv",
+      RESULTS / "phase2_baseline_predictions.csv"],
+     [RESULTS / "phase6_li_comparison_predictions.csv", RESULTS / "phase6_li_comparison_summary.csv",
+      RESULTS / "phase6_li_comparison_headline.csv", RESULTS / "phase6_li_comparison_perbasin.csv"]),
+
+    ("phase6_era5",
+     ["scripts/run_phase6_era5.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "era5_basin_month.csv", RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase6_era5_headline.csv", RESULTS / "phase6_era5_predictions.csv"]),
+
+    ("era5_attribution",
+     ["scripts/run_phase6_era5_attribution.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "era5_basin_month.csv", RESULTS / "phase6_era5_predictions.csv",
+      RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase6_era5_attribution.csv", RESULTS / "phase6_era5_attribution_folds.csv",
+      RESULTS / "phase6_era5_attribution_continent.csv", RESULTS / "phase6_era5_attribution_fdr.csv"]),
+
+    ("basin_analysis",
+     ["scripts/run_phase6_basin_analysis.py"],
+     [RESULTS / "phase5_coupled_coupling.csv", RESULTS / "phase4_conditioned_predictions.csv",
+      RESULTS / "phase2_strata.csv", RESULTS / "phase6_li_comparison_perbasin.csv",
+      RESULTS / "phase3b_predictions.csv", RESULTS / "phase6_era5_predictions.csv",
+      RESULTS / "kalman_fold_params.pkl", DATA / "era5_basin_coverage.csv"],
+     [RESULTS / "phase6_basin_analysis_summary.csv"]),
+
+    ("resolution",
+     ["scripts/run_resolution_sensitivity.py"],
+     [*CSR_GEOMETRY_FILES, MASK_NC, RESULTS / "phase3b_predictions.csv"],
+     [RESULTS / "resolution_diagnostics.csv", RESULTS / "resolution_cross_2x2.csv",
+      RESULTS / "resolution_cross_2x2_200k.csv"]),
+
+    ("phase7_resmlp",
+     ["scripts/run_phase7.py", "--arch", "resmlp"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "era5_basin_month.csv", RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase7_resmlp_summary.csv", RESULTS / "phase7_resmlp_predictions.csv"]),
+
+    ("phase7_lstm",
+     ["scripts/run_phase7.py", "--arch", "lstm"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "era5_basin_month.csv", RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase7_lstm_summary.csv", RESULTS / "phase7_lstm_predictions.csv"]),
+
+    ("phase8_h13",
+     ["scripts/run_phase8_lstm_combined.py", "--horizons", "1-3"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "era5_basin_month.csv", RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase8_lstm_combined_summary.csv",
+      RESULTS / "phase8_lstm_combined_predictions.csv"]),
+
+    ("phase8_h46",
+     ["scripts/run_phase8_lstm_combined.py", "--horizons", "4-6", "--tag", "phase8b_lstm_h46"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "era5_basin_month.csv", RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase8b_lstm_h46_summary.csv",
+      RESULTS / "phase8b_lstm_h46_predictions.csv"]),
+
+    ("phase8b_merge",
+     ["scripts/run_phase8b_merge.py"],
+     [RESULTS / "phase8_lstm_combined_predictions.csv",
+      RESULTS / "phase8_lstm_combined_summary.csv",
+      RESULTS / "phase8b_lstm_h46_predictions.csv",
+      RESULTS / "phase8b_lstm_h46_summary.csv",
+      RESULTS / "phase6_li_comparison_predictions.csv",
+      DATA / "li2026_basin_coverage.csv", DATA / "basin_meta.csv"],
+     [RESULTS / "phase8b_h16_headline.csv", RESULTS / "phase8b_h16_ensemble_headline.csv",
+      RESULTS / "phase8b_li_comparison_headline.csv", RESULTS / "phase8b_li_comparison_perbasin.csv"]),
+
+    ("phase8_strat",
+     ["scripts/run_phase8_stratification.py"],
+     [RESULTS / "resolution_diagnostics.csv", RESULTS / "phase8_lstm_combined_predictions.csv",
+      RESULTS / "phase8b_lstm_h46_predictions.csv",
+      RESULTS / "phase7_resmlp_predictions.csv"],
+     [RESULTS / "phase8_stratification.csv"]),
+
+    ("phase7_gnn",
+     ["scripts/run_phase7.py", "--arch", "gnn"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "era5_basin_month.csv", RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "phase7_gnn_summary.csv"]),
+
+    ("flat12_train85",
+     ["scripts/run_flat12_train85_sensitivity.py"],
+     [DATA / "basin_month_twsa_global.csv", DATA / "basin_meta.csv",
+      DATA / "era5_basin_month.csv", RESULTS / "phase7_lstm_predictions.csv",
+      RESULTS / "kalman_fold_params.pkl"],
+     [RESULTS / "flat12_train85_sensitivity.csv"]),
+
+    ("ladder",
+     ["scripts/build_paper_ladder.py"],
+     [RESULTS / "phase2_baseline_predictions.csv", RESULTS / "kalman_predictions.csv",
+      RESULTS / "flat12_ridge_predictions.csv"],
+     [RESULTS / "paper_baseline_ladder.csv", RESULTS / "paper_baseline_contrasts.csv"]),
+
+    ("conventional_metrics",
+     ["scripts/compute_conventional_metrics.py"],
+     [DATA / "basin_month_twsa_global.csv", RESULTS / "phase2_baseline_predictions.csv",
+      RESULTS / "kalman_predictions.csv", RESULTS / "flat12_ridge_predictions.csv"],
+     [RESULTS / "conventional_metrics_perbasin.csv", RESULTS / "conventional_metrics_summary.csv"]),
+
+    ("figures",
+     ["scripts/make_figures.py"],
+     [MASK_NC, DATA / "basin_meta.csv", DATA / "basin_month_twsa_global.csv",
+      DATA / "li2026_basin_coverage.csv",
+      RESULTS / "paper_baseline_ladder.csv", RESULTS / "paper_baseline_contrasts.csv",
+      RESULTS / "conventional_metrics_perbasin.csv", RESULTS / "conventional_metrics_summary.csv",
+      RESULTS / "phase2_baseline_predictions.csv", RESULTS / "kalman_predictions.csv",
+      RESULTS / "flat12_ridge_predictions.csv", RESULTS / "flat12_train85_sensitivity.csv",
+      RESULTS / "kalman_mission_summary.csv", RESULTS / "r0_ablation_summary.csv",
+      RESULTS / "phase6_li_comparison_headline.csv", RESULTS / "phase6_li_comparison_perbasin.csv",
+      RESULTS / "phase6_li_comparison_summary.csv",
+      RESULTS / "jpl" / "phase6_li_comparison_headline.csv",
+      RESULTS / "jpl" / "phase6_li_comparison_perbasin.csv",
+      RESULTS / "jpl" / "phase6_li_comparison_summary.csv",
+      RESULTS / "phase7_lstm_summary.csv", RESULTS / "phase7_lstm_predictions.csv"],
+     [FIGURES / f"{stem}.pdf" for stem in
+      ("fig01_basins", "fig02_benchmark_ladder", "fig03_example_series",
+       "fig04_filter_mechanism", "fig05_era5_where", "fig06_sequence_models",
+       "fig07_crossing")]),
+
+    ("manifest",
+     ["scripts/make_manifest.py"],
+     [],
+     [RESULTS / "SHA256_MANIFEST_LIVE.csv"]),
+]
+# figures is not in the default list because it reads outputs of extended steps
+# (phase7_lstm, flat12_train85) and the JPL comparison tables.
+DEFAULT = [
+    "build_basin", "build_era5", "build_li", "phase2", "kalman", "flat12_ridge",
+    "kalman_mission", "r0_ablation", "ladder", "li_comparison",
+    "conventional_metrics", "manifest",
+]
+# Neighbor experiments, torch models and figures. Run with --extended or name in --steps.
+EXTENDED = [s[0] for s in STEPS if s[0] not in DEFAULT]
+
+SHARED_DATA_FILES = {
+    "indices.csv", "era5_basin_month.csv", "era5_basin_coverage.csv",
+}
+JPL_UNAVAILABLE = {"figures"}
+
+
+def steps_for_source(source: str, mascon_file: Path | None = None,
+                     no_scale_factors: bool = False):
+    """Return (steps, default step names, results directory) for one product.
+
+    CSR returns the declared lists unchanged. For JPL, processed data, results and
+    figures move to a <source> subdirectory (the ERA5-Land and index tables are
+    shared), the CSR input files are swapped for their JPL counterparts, build_basin
+    and build_li receive --source, and build_basin also receives --mascon-file and
+    --no-scale-factors when given.
+    """
+    if source == "csr":
+        return STEPS, DEFAULT, RESULTS
+    data_jpl = DATA / source
+    results_jpl = RESULTS / source
+    figures_jpl = FIGURES / source
+    jpl_mascon = mascon_file or (
+        RAW / "GRCTellus.JPL.200204_202604.GLO.RL06.3M.MSCNv04.nc"
+    )
+    converted = []
+    for name, cmd, inputs, outputs in STEPS:
+        cmd = list(cmd)
+        if name in {"build_basin", "build_li"}:
+            cmd += ["--source", source]
+        if name == "build_basin" and mascon_file is not None:
+            cmd += ["--mascon-file", str(jpl_mascon)]
+        if name == "build_basin" and no_scale_factors:
+            cmd += ["--no-scale-factors"]
+
+        def remap(path: Path) -> Path:
+            if path == MASCON_NC:
+                return jpl_mascon
+            if path == RAW / "li2026" / "CSR-FCast" / "global_gridded":
+                return RAW / "li2026" / "JPL-FCast" / "global_gridded"
+            if path.is_relative_to(DATA):
+                if path.name in SHARED_DATA_FILES:
+                    return path
+                relative = path.relative_to(DATA)
+                if relative.name == "li2026_csr_basin_forecasts.csv":
+                    relative = relative.with_name("li2026_jpl_basin_forecasts.csv")
+                return data_jpl / relative
+            if path.is_relative_to(RESULTS):
+                return results_jpl / path.relative_to(RESULTS)
+            if path.is_relative_to(FIGURES):
+                return figures_jpl / path.relative_to(FIGURES)
+            return path
+
+        mapped_inputs = [remap(p) for p in inputs]
+        if name == "build_li":
+            # JPL reads mascon_ID from the product, so the three CSR geometry files
+            # are dropped here rather than remapped (remap() would turn MASCON_NC into
+            # the JPL file).
+            mapped_inputs = [remap(p) for p in inputs if p not in CSR_GEOMETRY_FILES]
+        if name == "resolution":
+            mapped_inputs = [jpl_mascon, MASK_NC,
+                             results_jpl / "phase3b_predictions.csv"]
+        converted.append((name, cmd, mapped_inputs, [remap(p) for p in outputs]))
+    default = [name for name in DEFAULT if name not in JPL_UNAVAILABLE]
+    return converted, default, results_jpl
+
+
+def run_step(name: str, args: list[str], inputs: list[Path], outputs: list[Path],
+             results: Path) -> None:
+    missing = [str(p) for p in inputs if not p.exists()]
+    if missing:
+        raise SystemExit(f"[{name}] BLOCKED, missing inputs:\n  " + "\n  ".join(missing))
+    results.mkdir(parents=True, exist_ok=True)
+    log = results / f"chain_{name}.log"
+    t0 = time.time()
+    print(f"[{name}] start -> {log.name}", flush=True)
+    with open(log, "w", encoding="utf-8") as fh:
+        rc = subprocess.run([str(PY), *args], cwd=ROOT, stdout=fh,
+                            stderr=subprocess.STDOUT).returncode
+    mins = (time.time() - t0) / 60
+    if rc != 0:
+        raise SystemExit(f"[{name}] FAILED (exit {rc}, {mins:.1f} min), see {log}")
+    stale = [str(p) for p in outputs
+             if not p.exists() or p.stat().st_mtime < t0 - 1]
+    if stale:
+        raise SystemExit(f"[{name}] FAILED, outputs missing or not refreshed:\n  "
+                         + "\n  ".join(stale))
+    print(f"[{name}] done ({mins:.1f} min)", flush=True)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--source", choices=("csr", "jpl"), default="csr")
+    ap.add_argument("--mascon-file", type=Path,
+                    help="JPL mascon NetCDF to use instead of the default file")
+    ap.add_argument("--no-scale-factors", action="store_true",
+                    help="disable scale factors when building a JPL CRI target")
+    ap.add_argument("--steps", nargs="+", default=None)
+    ap.add_argument("--extended", action="store_true",
+                    help="run the extended steps (neighbor experiments, torch models) "
+                         "instead of the default list")
+    ap.add_argument("--list", action="store_true")
+    args = ap.parse_args()
+    if args.mascon_file is not None and args.source != "jpl":
+        ap.error("--mascon-file applies only to --source jpl")
+    if args.no_scale_factors and args.source != "jpl":
+        ap.error("--no-scale-factors applies only to --source jpl")
+    mascon_file = args.mascon_file.resolve() if args.mascon_file is not None else None
+    if args.steps and args.extended:
+        ap.error("--steps and --extended are mutually exclusive")
+    steps, default, results = steps_for_source(
+        args.source, mascon_file, args.no_scale_factors
+    )
+    by_name = {s[0]: s for s in steps}
+    if args.list:
+        for name, cmd, inputs, outputs in steps:
+            if args.source == "jpl" and name in JPL_UNAVAILABLE:
+                flag = "  [unavailable for JPL]"
+            else:
+                flag = "" if name in default else "  [extended]"
+            print(f"{name}{flag}\n  cmd: {' '.join(cmd)}")
+            for label, paths in (("in", inputs), ("out", outputs)):
+                for p in paths:
+                    try:
+                        shown = p.relative_to(ROOT)
+                    except ValueError:
+                        shown = p
+                    print(f"  {label}:  {shown}")
+        return
+    # --extended on JPL skips the CSR-only figures step rather than blocking on it;
+    # naming it in --steps still errors, because that asks for it explicitly.
+    extended = [n for n in EXTENDED
+                if not (args.source == "jpl" and n in JPL_UNAVAILABLE)]
+    chosen = args.steps or (extended if args.extended else default)
+    unknown = [s for s in chosen if s not in by_name]
+    if unknown:
+        raise SystemExit(f"unknown steps: {unknown}; use --list")
+    unavailable = sorted(set(chosen) & JPL_UNAVAILABLE) if args.source == "jpl" else []
+    if unavailable:
+        raise SystemExit(
+            "steps unavailable for JPL: " + ", ".join(unavailable)
+            + "; make_figures.py checks the CSR values quoted in the paper"
+        )
+    os.environ["GRACEFC_SOURCE"] = args.source
+    if mascon_file is not None:
+        os.environ["GRACEFC_MASCON_FILE"] = str(mascon_file)
+    else:
+        os.environ.pop("GRACEFC_MASCON_FILE", None)
+    print(f"source: {args.source}; results: {results.relative_to(ROOT)}", flush=True)
+    print(f"chain: {' -> '.join(chosen)}", flush=True)
+    for name in chosen:
+        run_step(*by_name[name], results)
+    print("chain complete", flush=True)
+
+
+if __name__ == "__main__":
+    main()

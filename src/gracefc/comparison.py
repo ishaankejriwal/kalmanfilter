@@ -1,0 +1,70 @@
+"""Basin coverage rules for the GRACE-FCast comparison (Li and Kusche, 2026)."""
+
+import numpy as np
+import pandas as pd
+
+
+def fully_contained_group_counts(
+    group_grid: np.ndarray,
+    basin_indices: list[np.ndarray],
+    valid_groups: np.ndarray | None = None,
+) -> np.ndarray:
+    """Number of complete parent cells inside each basin.
+
+    group_grid labels every cell of the fine basin-mask grid with its parent cell (a
+    native mascon or a GRACE-FCast cell), and basin_indices holds each basin's flat
+    indices into that grid. A parent cell counts for a basin only when all of its fine
+    cells lie in the basin. valid_groups, ordered like the sorted unique labels, can
+    exclude parent cells the comparison product does not forecast, such as GRACE-FCast
+    ocean cells.
+    """
+    labels = np.asarray(group_grid).reshape(-1)
+    if not np.isfinite(labels).all():
+        raise ValueError("group grid contains non-finite labels")
+    _, compact = np.unique(labels, return_inverse=True)
+    totals = np.bincount(compact)
+    valid = np.ones(len(totals), dtype=bool)
+    if valid_groups is not None:
+        raw_valid = np.asarray(valid_groups, dtype=bool).reshape(-1)
+        if raw_valid.size != len(totals):
+            raise ValueError(
+                f"valid_groups has {raw_valid.size} entries for {len(totals)} groups"
+            )
+        valid = raw_valid
+
+    counts = np.zeros(len(basin_indices), dtype=np.int64)
+    for row, idx in enumerate(basin_indices):
+        inside = np.bincount(compact[np.asarray(idx, dtype=np.int64)], minlength=len(totals))
+        counts[row] = int(np.sum((inside == totals) & valid))
+    return counts
+
+
+def li_joint_support_table(meta: pd.DataFrame, coverage: pd.DataFrame) -> pd.DataFrame:
+    """Per-basin coverage diagnostics with the fully covered flag, joint_full_cells.
+
+    A kept basin is fully covered when it fully contains at least one native mascon of
+    the scored product (n_full_native_mascons, from scripts/build_li_basin_series.py) and
+    at least one complete, finite GRACE-FCast cell.
+    """
+    meta_cols = ["name", "exclude_reason"]
+    coverage_cols = ["name", "li_coverage", "n_full_li_cells", "n_full_native_mascons"]
+    if missing := set(meta_cols).difference(meta.columns):
+        raise ValueError(f"basin metadata missing columns: {sorted(missing)}")
+    if missing := set(coverage_cols).difference(coverage.columns):
+        raise ValueError(f"Li coverage table missing columns: {sorted(missing)}")
+
+    support = meta[meta_cols].merge(
+        coverage[coverage_cols], on="name", how="inner", validate="one_to_one"
+    )
+    support["joint_full_cells"] = (
+        support["exclude_reason"].eq("keep")
+        & support["n_full_native_mascons"].ge(1)
+        & support["n_full_li_cells"].ge(1)
+    )
+    return support
+
+
+def li_joint_support_names(meta: pd.DataFrame, coverage: pd.DataFrame) -> pd.Index:
+    """Names of the fully covered basins (joint_full_cells)."""
+    support = li_joint_support_table(meta, coverage)
+    return pd.Index(support.loc[support["joint_full_cells"], "name"], name="name")

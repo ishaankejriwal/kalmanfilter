@@ -1,0 +1,20 @@
+# Environments and caches
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Input data and the large result files are in the Zenodo data archive, not in git
+data/
+*.nc
+results/*_predictions.csv
+results/*_placebo_basin.csv
+results/phase3b_placebo_monthly.csv
+results/jpl/*_predictions.csv
+results/jpl/*_placebo_basin.csv
+results/jpl/*_placebo_monthly.csv
+results/jpl/*.pkl
+results/chain_*.log
+results/jpl/chain_*.log
+deposit/

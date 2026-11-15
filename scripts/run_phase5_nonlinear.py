@@ -1,0 +1,87 @@
+"""Compare gradient-boosting and MLP correction heads with ridge, with and without neighbors.
+
+Every head predicts the error of the Kalman filter forecast at leads of 1 to 3 months,
+from the basin's own filtered state (own), plus the correlation-selected neighbor
+(corr_top1), plus that neighbor's own top neighbor (corr_top1_2hop). The gbm neighbor
+arms are ranked against degree-matched random-neighbor placebos, and each nonlinear
+head is tested against its ridge twin. Not used in the manuscript.
+
+Inputs: data/processed/basin_month_twsa_global.csv, basin_meta.csv,
+results/kalman_fold_params.pkl.
+Outputs: results/<tag>_predictions.csv, <tag>_placebo_monthly.csv, <tag>_summary.csv
+(default tag phase5_nonlinear).
+
+Usage:
+  python scripts/run_phase5_nonlinear.py [--placebo 20]
+  GRACEFC_SOURCE=jpl python scripts/run_phase5_nonlinear.py [--placebo 20]
+"""
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from gracefc.experiment_nonlinear import run_nonlinear_experiment  # noqa: E402
+from gracefc.models import rmse  # noqa: E402
+from gracefc.stats import pooled_monthly_dm  # noqa: E402
+from gracefc.cache import load_params_cache  # noqa: E402
+from gracefc.runtime import load_sample, processed_dir, results_dir  # noqa: E402
+
+OUT_DIR = results_dir(ROOT)
+DATA = processed_dir(ROOT)
+PARAMS_CACHE = OUT_DIR / "kalman_fold_params.pkl"
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--placebo", type=int, default=20)
+    ap.add_argument("--tag", default="phase5_nonlinear")
+    args = ap.parse_args()
+
+    wide, meta, keep = load_sample(DATA)
+    cache = load_params_cache(PARAMS_CACHE, DATA / "basin_month_twsa_global.csv")
+    print(f"sample: {wide.shape[1]} basins | placebo seeds={args.placebo}")
+
+    pred_rows, plac_monthly = run_nonlinear_experiment(wide, n_placebo=args.placebo, params_cache=cache)
+    pred_rows.to_csv(OUT_DIR / f"{args.tag}_predictions.csv", index=False)
+    plac_monthly.to_csv(OUT_DIR / f"{args.tag}_placebo_monthly.csv", index=False)
+
+    # Placebo rank for the gbm arms. Ridge has no placebos, and the MLP placebo labels
+    # carry a seed suffix (mlp_corr_top1_s<k>_rand<seed>)
+    plac_pooled = (plac_monthly.groupby(["model", "horizon"])[["sum", "count"]].sum()
+                   .assign(rmse=lambda d: np.sqrt(d["sum"] / d["count"])))
+    rows = []
+    for (model, h), grp in pred_rows.groupby(["model", "horizon"]):
+        row = {"model": model, "horizon": h,
+               "rmse_std": rmse(grp["target"].values, grp["pred"].values), "n": len(grp)}
+        fam = model.rsplit("_s", 1)[0] if "_s" in model else model
+        prefix = f"{fam}_rand"
+        dist = plac_pooled.loc[
+            plac_pooled.index.get_level_values(0).str.startswith(prefix)
+            & (plac_pooled.index.get_level_values(1) == h)]["rmse"].values
+        if len(dist):
+            row["placebo_n"] = len(dist)
+            row["placebo_beaten"] = int((row["rmse_std"] < dist).sum())
+            row["p_rank"] = float((1 + (dist <= row["rmse_std"]).sum()) / (1 + len(dist)))
+        # Ridge twin: same features, ridge head (gbm_own -> ridge_own)
+        ref = "ridge_" + fam.split("_", 1)[1] if "_" in fam and not fam.startswith("ridge") else None
+        if ref and ref in set(pred_rows["model"]):
+            stat, p = pooled_monthly_dm(pred_rows, model, ref, h)
+            row["dm_vs_ridge_twin"], row["dm_p"] = stat, p
+        rows.append(row)
+    summary = pd.DataFrame(rows)
+    own = summary[summary["model"] == "ridge_own"].set_index("horizon")["rmse_std"]
+    summary["skill_vs_ridge_own"] = 1 - (summary["rmse_std"] / summary["horizon"].map(own)) ** 2
+    summary = summary.sort_values(["horizon", "rmse_std"]).reset_index(drop=True)
+    summary.to_csv(OUT_DIR / f"{args.tag}_summary.csv", index=False)
+    for h in sorted(summary["horizon"].unique()):
+        print(f"\n=== horizon {h} ===")
+        print(summary[summary["horizon"] == h].to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()

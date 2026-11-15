@@ -1,0 +1,181 @@
+"""One-layer graph attention network correcting the Kalman filter forecast on the correlation graph.
+
+Nodes are basins, and directed edges run from each basin's correlation top-k sources into
+it. Node features are the filtered state, plus the 33 ERA5-Land lag anomalies (11 series
+at lags 0 to 2) in the _era5 arms. A single attention layer aggregates messages from the k
+sources, so with k = 2 the network weights a second neighbor alongside the first. In the
+_era5 arms the messages also carry the neighbor's ERA5-Land features, which the flat ridge
+models do not see. The network predicts the filter error (target - kalman) at every
+(month, basin); training uses pre-test months only, and messages use features from the
+same issue month. Placebo arms rewire to degree-matched random graphs and retrain with
+the same torch seed as the real arm; draws are seeded per (fold, lead time). Training is
+full-batch Adam with early stopping on the last 15 % of training issue months.
+"""
+import copy
+import zlib
+from functools import partial
+
+import numpy as np
+import pandas as pd
+import torch
+from torch import nn
+
+from .era5 import era5_fold_features
+from .evaluate import DEFAULT_FOLDS, Fold
+from .experiment_nonlinear import _fit_head
+from .graphs import corr_topk, random_degree_matched
+from .phase7 import (emit_placebo_rows, emit_rows, flat_ridge_arms, fold_setup, horizon_frame,
+                     neighbor_rank_matrix, propagated_neighbor_features, train_val_mask)
+
+
+class _GATLite(nn.Module):
+    """One attention head, one message-passing layer, linear residual readout."""
+
+    def __init__(self, d_in: int, hidden: int = 16):
+        super().__init__()
+        self.W = nn.Linear(d_in, hidden, bias=False)
+        self.a_dst = nn.Linear(hidden, 1, bias=False)
+        self.a_src = nn.Linear(hidden, 1, bias=False)
+        self.self_lin = nn.Linear(d_in, hidden)
+        self.head = nn.Linear(hidden, 1)
+
+    def forward(self, X, nbr, mask):
+        # X: (T, N, d); nbr: (N, k) source indices; mask: (N, k) validity
+        Wx = self.W(X)                                   # (T, N, H)
+        nb = Wx[:, nbr, :]                               # (T, N, k, H)
+        e = torch.nn.functional.leaky_relu(
+            self.a_dst(Wx).unsqueeze(2) + self.a_src(nb), negative_slope=0.2)
+        e = e.masked_fill(~mask[None, :, :, None], -1e9)
+        alpha = torch.softmax(e, dim=2) * mask[None, :, :, None]
+        m = (alpha * nb).sum(dim=2)                      # (T, N, H)
+        h = torch.relu(self.self_lin(X) + m)
+        return self.head(h).squeeze(-1)                  # (T, N)
+
+
+def fit_gat(
+    X: np.ndarray, nbr_idx: np.ndarray,
+    tr_entries: tuple, ytr: np.ndarray, val_mask: np.ndarray, te_entries: tuple, seed: int,
+    hidden: int = 16, max_epochs: int = 400, patience: int = 30, lr: float = 5e-3,
+) -> np.ndarray:
+    """Train full-batch on the (t, node) training entries, early-stopping on the val_mask entries.
+
+    Returns predictions at the test entries.
+    """
+    torch.manual_seed(seed)
+    Xt = torch.tensor(X, dtype=torch.float32)
+    nbr = torch.tensor(np.clip(nbr_idx, 0, None), dtype=torch.long)
+    mask = torch.tensor(nbr_idx >= 0)
+    t_tr = torch.tensor(tr_entries[0][~val_mask]), torch.tensor(tr_entries[1][~val_mask])
+    t_va = torch.tensor(tr_entries[0][val_mask]), torch.tensor(tr_entries[1][val_mask])
+    ya = torch.tensor(ytr[~val_mask], dtype=torch.float32)
+    yv = torch.tensor(ytr[val_mask], dtype=torch.float32)
+    net = _GATLite(X.shape[2], hidden)
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    lossf = nn.MSELoss()
+    best_state, best_val, bad = copy.deepcopy(net.state_dict()), np.inf, 0
+    for _ in range(max_epochs):
+        net.train()
+        opt.zero_grad()
+        pred = net(Xt, nbr, mask)
+        loss = lossf(pred[t_tr[0], t_tr[1]], ya)
+        loss.backward()
+        opt.step()
+        net.eval()
+        with torch.no_grad():
+            v = float(lossf(net(Xt, nbr, mask)[t_va[0], t_va[1]], yv))
+        if v < best_val - 1e-5:
+            best_val, best_state, bad = v, copy.deepcopy(net.state_dict()), 0
+        else:
+            bad += 1
+            if bad >= patience:
+                break
+    net.load_state_dict(best_state)
+    net.eval()
+    with torch.no_grad():
+        full = net(Xt, nbr, mask)
+    return full[torch.tensor(te_entries[0]), torch.tensor(te_entries[1])].numpy()
+
+
+def _era5_node_tensor(era5_feats: pd.DataFrame, era5_cols: list[str], filt_index, names) -> np.ndarray:
+    """(T, N, C) ERA5-Land lag features aligned to the filter grid; NaN -> 0 for message passing."""
+    mats = []
+    for col in era5_cols:
+        m = era5_feats.pivot(index="issue_date", columns="name", values=col)
+        mats.append(m.reindex(index=filt_index, columns=names).values)
+    return np.nan_to_num(np.stack(mats, axis=-1))
+
+
+def run_gnn_experiment(
+    wide: pd.DataFrame,
+    era5_wide: dict[str, pd.DataFrame],
+    horizons: range = range(1, 4),
+    folds: list[Fold] = DEFAULT_FOLDS,
+    n_placebo: int = 20,
+    gnn_seeds: tuple[int, ...] = (0, 1, 2),
+    params_cache: dict | None = None,
+    era5_lags: tuple[int, ...] = (0, 1, 2),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (prediction rows for the real arms, monthly summed losses for the placebo arms)."""
+    out, placebo_monthly = [], []
+    for fold in folds:
+        setup = fold_setup(wide, fold, params_cache)
+        names, name_pos, F = setup["names"], setup["name_pos"], setup["F"]
+        graph = corr_topk(setup["train_src"], 2)
+        idx2 = neighbor_rank_matrix(graph, names, name_pos, 2)
+        idx1 = idx2[:, :1]
+        era5_feats, era5_cols = era5_fold_features(era5_wide, fold.test_start, names, era5_lags)
+        E = _era5_node_tensor(era5_feats, era5_cols, setup["filt"].index, names)
+        X_state = F[:, :, None]
+        X_era5 = np.concatenate([X_state, E], axis=2)
+
+        for h in horizons:
+            frame = horizon_frame(setup, fold, h, era5_feats, era5_cols)
+            if frame is None:
+                continue
+            tr, te, ytr = frame["tr"], frame["te"], frame["ytr"]
+            kal_te = te["kalman"].values
+            val_mask = train_val_mask(tr)
+            tr_entries = (frame["t_idx"], frame["tr_pos"])
+            te_entries = (frame["e_idx"], frame["te_pos"])
+
+            emit = partial(emit_rows, out, te, fold, h)
+            emit_placebo = partial(emit_placebo_rows, placebo_monthly, te, fold, h)
+
+            emit("kalman_ar1", kal_te)
+
+            # Ridge twins (own ERA5-Land only; the GNN also sees the neighbor's)
+            nb_tr = propagated_neighbor_features(frame, idx2, "tr")
+            nb_te = propagated_neighbor_features(frame, idx2, "te")
+            for arm, (Xtr, Xte) in flat_ridge_arms(tr, te, era5_cols, nb_tr, nb_te).items():
+                emit(f"ridge_{arm}", kal_te + _fit_head("ridge", Xtr, ytr, Xte, 0))
+
+            arms = {
+                "corr_top1": (X_state, idx1),
+                "corr_top2": (X_state, idx2),
+                "corr_top1_era5": (X_era5, idx1),
+                "corr_top2_era5": (X_era5, idx2),
+            }
+            for arm, (X, nidx) in arms.items():
+                for s in gnn_seeds:
+                    emit(f"gnn_{arm}_s{s}",
+                         kal_te + fit_gat(X, nidx, tr_entries, ytr, val_mask, te_entries, s))
+
+            cell_base = zlib.crc32(f"phase7_gnn:{fold.name}:h{h}".encode()) % 1_000_000
+            for seed in range(n_placebo):
+                g_rand = random_degree_matched(graph, cell_base + seed)
+                p2 = neighbor_rank_matrix(g_rand, names, name_pos, 2)
+                p1 = p2[:, :1]
+                plac_arms = {
+                    "corr_top1": (X_state, p1),
+                    "corr_top2": (X_state, p2),
+                    "corr_top1_era5": (X_era5, p1),
+                    "corr_top2_era5": (X_era5, p2),
+                }
+                for arm, (X, nidx) in plac_arms.items():
+                    for s in gnn_seeds:
+                        emit_placebo(f"gnn_{arm}_s{s}_rand{seed}",
+                                     kal_te + fit_gat(X, nidx, tr_entries, ytr, val_mask,
+                                                      te_entries, s))
+            print(f"{fold.name} h{h} done", flush=True)
+    return (pd.concat(out, ignore_index=True),
+            pd.concat(placebo_monthly, ignore_index=True) if placebo_monthly else pd.DataFrame())
