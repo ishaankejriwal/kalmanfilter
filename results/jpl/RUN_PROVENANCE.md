@@ -41,21 +41,19 @@ missing months.
 
 ## Basins
 
-The basin mask is `HydroShed+Mascon_Basins_L3.nc`, SHA-256
-`b0434196b7615366626b4bd88ce1f450c63c79e1ebe0b866fea3a05aebaf4a24`. The JPL table has 284
-mask basins: 228 kept for modeling, 46 ice sheets, 4 water bodies and 6 without valid
-JPL observations.
+The JPL run used the basin mask `HydroShed+Mascon_Basins_L3.nc`, SHA-256
+`b0434196b7615366626b4bd88ce1f450c63c79e1ebe0b866fea3a05aebaf4a24`. The JPL
+analysis uses 228 of the mask's 284 regions, excluding 46 ice-sheet regions,
+four water bodies, and six regions without valid JPL observations.
 
 ## Processed inputs
 
-The table below lists SHA-256 checksums of the processed JPL inputs in
-`data/processed/jpl/`. The runs wrote these inputs and the result files with the
-mask's basin names. On 2026-11-15, we replaced those names with the labels B001
-to B284.
+The runs used the original basin names in the processed inputs and result
+files. On 2026-11-15, we replaced only those names with labels B001 to B284 for
+the deposit. The checksums below and in `SHA256_MANIFEST_LIVE.csv` refer to
+the relabeled versions of the files recorded on 2026-10-14.
 
-The checksums below and in `SHA256_MANIFEST_LIVE.csv` describe the relabeled
-files. Except for the basin labels, those files match the files recorded on
-2026-10-14 byte for byte.
+The table lists the processed JPL inputs in `data/processed/jpl/`:
 
 | File | SHA-256 |
 |---|---|
@@ -91,11 +89,11 @@ pipeline scores every model on the same
 - The `all_matched` population contains every basin and date row available to
   all compared models. It has 227 basins, 13,393 rows per horizon, and 59 issue
   months.
-- The `joint_full_cells` population contains basins that fully contain native
-  JPL and GRACE-FCast cells. It has 67 basins, 3,953 rows per horizon, and 59
-  issue months.
+- The `joint_full_cells` population includes basins with complete native JPL
+  and GRACE-FCast cells within their boundaries. It has 67 basins, 3,953 rows
+  per horizon, and 59 issue months.
 
-For `joint_full_cells`, each basin must contain both of these cell sets:
+A basin qualifies for `joint_full_cells` if it contains both:
 
 - Every 0.25-degree mask subcell of at least one native JPL `mascon_ID`
 - All sixteen 0.25-degree subcells of at least one finite 1-degree GRACE-FCast cell.

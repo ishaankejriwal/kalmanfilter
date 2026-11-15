@@ -45,18 +45,18 @@ It contains `src/`, `scripts/`, and `requirements-lock.txt` at commit `71be5ec`
 of the JPL pipeline branch. That revision produced the JPL tables and row-level
 files in `results/jpl/`. `results/jpl/RUN_PROVENANCE.md` records the run.
 
-The JPL code archive excludes three parts of that commit because they contain
-basin names from the mask file (see "Basin partition"):
+We omit the following from the JPL archive because they contain the original
+basin names (see "Basin partition"):
 
-- The `tests/` directory
-- The `scripts/make_figures.py` script
-- The `src/gracefc/basins.py` module.
+- `tests/`
+- `scripts/make_figures.py`
+- `src/gracefc/basins.py`
 
-The main code archive contains their current versions. The current
-`src/gracefc/basins.py` differs from the archived version only in the basin
-labels. The main code archive also contains the CSR results and figures.
-Its JPL pipeline adds the `flat12_ridge` and `kalman_mission` steps, which the
-archived JPL run did not include.
+Their current versions are in the main code archive. In
+`src/gracefc/basins.py`, the only difference from the archived version is the
+use of basin labels in place of names. The main archive also contains the CSR
+results and figures, but its JPL pipeline includes two steps absent from the
+archived run: `flat12_ridge` and `kalman_mission`.
 
 To regenerate the archived JPL tables:
 
@@ -84,30 +84,29 @@ the climate indices.
 
 ## Basin partition
 
-The basin mask (`HydroShed+Mascon_Basins_L3.nc`) is a 0.25° partition. It combines
-HydroSHEDS Level-3 basins with the CSR mascon land and ocean mask. We do not have
-clearance to release it, so this deposit excludes it.
+The basin mask (`HydroShed+Mascon_Basins_L3.nc`) defines the study basins on a
+0.25° grid by combining HydroSHEDS Level-3 basins with the CSR mascon land and
+ocean mask. The mask is not in the archive because we do not have permission
+to distribute it.
 
-The deposit contains the basin series from that mask. Those series support
-every table and Figs. 2, 3, 6, and 7. Figs. 1, 4, and 5 contain basin maps and
-need the mask. If the mask is absent, `scripts/make_figures.py` builds only the
-other four figures.
+The archived basin time series are sufficient to reproduce every table and
+Figs. 2, 3, 6, and 7. The maps in Figs. 1, 4, and 5 require the mask.
+Without it, `scripts/make_figures.py` skips those three figures.
 
-These scripts read the mask:
+The following scripts read the basin mask:
 
-- The `build_basin_series.py` script
-- The `build_era5_basin_table.py` script
-- The `build_li_basin_series.py` script
-- The `run_resolution_sensitivity.py` script
-- The `inspect_inputs.py` script
-- The `make_figures.py` script.
+- `build_basin_series.py`
+- `build_era5_basin_table.py`
+- `build_li_basin_series.py`
+- `run_resolution_sensitivity.py`
+- `inspect_inputs.py`
+- `make_figures.py`
 
-Every file identifies basins by the labels B001 to B284 in its `name` column.
-`data/processed/basin_meta.csv` gives each basin's centroid, area, continent, and
-numerical mask identifier (`id`). The water bodies B283 and B284 share one mask
-identifier. The pipeline wrote the result and processed files with the mask's
-basin names. We later replaced those names with the labels and left all other
-content unchanged.
+For the deposit, we replaced only the basin names in the processed inputs and
+result files, using labels B001 to B284 in the `name` column.
+`data/processed/basin_meta.csv` lists each basin's centroid, area, continent,
+and numerical identifier in the mask (`id`). The water bodies B283 and B284
+share an identifier.
 
 ## Reproducing the figures and tables
 

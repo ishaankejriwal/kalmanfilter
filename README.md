@@ -40,8 +40,9 @@ basin inputs and row-level predictions. The
 Before you run the reproduction commands, unpack the code and data archives
 into the same folder.
 
-We do not have clearance to release the basin mask,
-`HydroShed+Mascon_Basins_L3.nc`. The available inputs support these tasks:
+We do not have permission to distribute the basin mask,
+`HydroShed+Mascon_Basins_L3.nc`. What you can reproduce depends on the inputs
+you have:
 
 | Task | Required inputs |
 |---|---|

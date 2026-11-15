@@ -5,8 +5,8 @@ from the [installation instructions](../README.md#installation) active. To
 rebuild figures from saved results, follow
 [Reproduce the paper](../README.md#reproduce-the-paper).
 
-We do not distribute the basin mask. The pipeline needs it to process raw
-data. The processed tables in the data archive support the later steps.
+Processing raw inputs requires the basin mask, which we do not distribute.
+The archived basin tables let you run the later stages without it.
 
 ## Input data
 
@@ -137,8 +137,8 @@ The [deposit notes](DEPOSIT_README.md) describe the three archives.
 
 ## Comparison populations
 
-In the GRACE-FCast comparisons, `joint_full_cells` keeps fully covered basins.
-Each basin must contain both of these cell sets:
+For the GRACE-FCast comparisons, a basin qualifies for `joint_full_cells` if
+it contains both:
 
 - Every 0.25-degree subcell of at least one native mascon
 - All 16 subcells of at least one finite 1-degree GRACE-FCast cell.
