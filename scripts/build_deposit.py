@@ -1,9 +1,9 @@
 """Stage the Zenodo deposit for the HESS submission into deposit/ (nothing is uploaded).
 
 Three archives:
-  kalmanfilter-<commit>-code.zip   the committed repository at HEAD (code, result
-                                     tables, figures, manuscript source)
-  kalmanfilter-<commit>-data.zip   the row-level CSR and JPL files and processed
+  kalmanfilter-v1.0-code.zip       the committed repository at HEAD (code, result
+                                     tables, figures); the manuscript is not included
+  kalmanfilter-v1.0-data.zip       the row-level CSR and JPL files and processed
                                      basin inputs that git excludes for size, with the
                                      checksum manifest that pins them and the deposit README;
                                      it unpacks into the same folder as the code. The basin
@@ -15,7 +15,7 @@ Three archives:
                                      scripts/make_figures.py and src/gracefc/basins.py are
                                      left out because they contain basin names from the mask
 
-Run from a clean checkout of the commit being cited, after
+Run from a clean checkout of the release being cited, after
 `python scripts/make_manifest.py --check` passes for CSR and with GRACEFC_SOURCE=jpl.
 
 Usage: python scripts/build_deposit.py
@@ -28,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "deposit"
 # The JPL results were produced on the JPL pipeline branch, which was not merged into this history
+VERSION = "v1.0"
 JPL_RUN_COMMIT = "71be5ec6af30e9d8f3c72549ca114c3b47071380"
 # Code only; that commit's draft manuscript, figures and docs are superseded by the main archive
 JPL_RUN_PATHS = ["src", "scripts", "requirements-lock.txt",
@@ -62,17 +63,15 @@ def deposit_files():
 def main():
     if subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT,
                       capture_output=True, text=True, check=True).stdout.strip():
-        raise SystemExit("tracked files have uncommitted changes; commit first so the code archive matches the cited commit")
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
-                            capture_output=True, text=True, check=True).stdout.strip()
+        raise SystemExit("tracked files have uncommitted changes; commit first so the code archive matches the release")
     files = deposit_files()
     missing = [str(p.relative_to(ROOT)) for p in files if not p.exists()]
     if missing:
         raise SystemExit(f"missing deposit inputs: {missing}")
     OUT.mkdir(exist_ok=True)
-    stem = OUT / f"kalmanfilter-{commit}"
+    stem = OUT / f"kalmanfilter-{VERSION}"
 
-    subprocess.run(["git", "-c", "core.autocrlf=false", "archive", "--format=zip", f"--prefix=kalmanfilter-{commit}/",
+    subprocess.run(["git", "-c", "core.autocrlf=false", "archive", "--format=zip", f"--prefix=kalmanfilter-{VERSION}/",
                     "-o", f"{stem}-code.zip", "HEAD"], cwd=ROOT, check=True)
     jpl_short = JPL_RUN_COMMIT[:7]
     subprocess.run(["git", "-c", "core.autocrlf=false", "archive", "--worktree-attributes", "--format=zip",
@@ -81,7 +80,7 @@ def main():
 
     with zipfile.ZipFile(f"{stem}-data.zip", "w", zipfile.ZIP_DEFLATED) as z:
         for p in files:
-            z.write(p, f"kalmanfilter-{commit}/{p.relative_to(ROOT).as_posix()}")
+            z.write(p, f"kalmanfilter-{VERSION}/{p.relative_to(ROOT).as_posix()}")
 
     for p in (Path(f"{stem}-code.zip"), Path(f"{stem}-data.zip"),
               OUT / f"kalmanfilter-{jpl_short}-jpl-run-code.zip"):

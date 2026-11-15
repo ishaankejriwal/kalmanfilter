@@ -1,7 +1,7 @@
 # Archive manifest
 
 This file lists the result file and columns behind each table, figure and in-text number in
-`paper/main.tex`. Tables and figures are numbered as in the manuscript. Table A1 of the
+the manuscript. Tables and figures are numbered as in the manuscript. Table A1 of the
 paper maps each model name (KF, KF-R1, KF-R12, KF-R12E and so on) to the identifier used in
 the result files.
 

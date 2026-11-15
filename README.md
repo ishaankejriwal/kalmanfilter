@@ -158,14 +158,12 @@ describes the three archives.
 | `tests/` | Regression and data tests (pytest) |
 | `results/`, `results/jpl/` | Result tables for CSR and JPL |
 | `figures/` | Manuscript figures |
-| `paper/` | Manuscript source (`main.tex`, `references.bib`) and the Copernicus LaTeX class |
 | `docs/` | `CODE_MAP.md`, `ARCHIVE_MANIFEST.md`, `DEPOSIT_README.md` |
 | `notebooks/` | Two exploratory notebooks, saved without outputs |
 
 ## Licence
 
-Code is released under the MIT licence (`LICENSE`), except the Copernicus LaTeX class, style and
-template files under `paper/`, which keep Copernicus's terms. Data and result files are released
+Code is released under the MIT licence (`LICENSE`). Data and result files are released
 under CC BY 4.0. Files derived from third-party products (CSR and JPL mascons, ERA5-Land, NOAA
 indices, GRACE-FCast, HydroSHEDS) remain subject to those products' attribution terms.
 
@@ -177,4 +175,4 @@ terrestrial water storage, submitted to Hydrology and Earth System Sciences, 202
 Kejriwal, I. and Wang, I.: Data and code for "A Kalman filter benchmark for data-driven forecasts
 of GRACE terrestrial water storage", Zenodo, 2026.
 
-DOI: to be added
+https://doi.org/10.5281/zenodo.24249848
